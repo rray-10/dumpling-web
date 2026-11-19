@@ -486,12 +486,8 @@
 /* ============================================================
    DATA
    ============================================================ */
-/* 訂單後端：Google Apps Script（原始碼在 gas/Code.gs）。
-   👉 請把下面的文字換成你自己部署的 /exec 網址（Apps Script → 部署 → 網頁應用程式，
-      網址長得像 https://script.google.com/macros/s/……/exec）。
-   還沒換的時候是「示範模式」：送單不會真的送出（訂單編號結尾為 -DEMO），訂單查詢也無法使用。 */
-const GAS_URL = '請貼上你的 Apps Script 網址';
-const GAS_READY = /^https:\/\/script\.google\.com\//.test(GAS_URL);
+const ORDER_API = { create: 'https://ijttnauijqfohgwxdfmk.supabase.co/functions/v1/smooth-handler', track: 'https://ijttnauijqfohgwxdfmk.supabase.co/functions/v1/get-order' };
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlqdHRuYXVpanFmb2hnd3hkZm1rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTUwNDYxOTcsImV4cCI6MjExMDYyMjE5N30.XJHmWt0j71d_qDi5Lln1dQ7Gojpf7uDNA0dz0b_S2GU'; // 請貼上 Supabase 的 anon public key
 
 const IMG = id => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=800&q=75`;
 
@@ -747,57 +743,50 @@ form.addEventListener('submit', e => {
   submitOrder(m);
 });
 
-/* 呼叫 Google Apps Script。用 text/plain 送 JSON,避免瀏覽器發出 CORS 預檢(GAS 不支援)。
-   連線失敗:e.network = true;回應 ok 不是 true:拋出後端的 error 訊息 */
-async function callGas(body) {
-  let r;
+async function callOrderApi(url, body) {
+  if (SUPABASE_ANON_KEY === '') throw new Error('網站尚未設定訂單服務');
+
+  let response;
   try {
-    r = await fetch(GAS_URL, {
+    response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        'apikey': SUPABASE_ANON_KEY
+      },
       body: JSON.stringify(body)
     });
   } catch (_) {
-    const e = new Error('network'); e.network = true; throw e;
+    const error = new Error('網路異常，請檢查連線後再試');
+    error.network = true;
+    throw error;
   }
-  let res = null;
-  try { res = await r.json(); } catch (_) {}
-  if (r.ok && res && res.ok === true) return res;
-  const msg = res && typeof res.error === 'string' && res.error ? res.error : '';
-  const e = new Error(msg || (r.ok ? '伺服器回應格式不正確' : `伺服器錯誤（HTTP ${r.status}），請稍後再試`));
-  e.status = r.status; throw e;
-}
 
-/* 示範模式(GAS_URL 尚未設定):不連網,在前端產生一張 -DEMO 訂單 */
-function demoOrder(m) {
-  const d = new Date(), p = n => String(n).padStart(2, '0');
-  const s = subtotal();
-  return {
-    ok: true, orderNo: `JF${String(d.getFullYear()).slice(-2)}${p(d.getMonth() + 1)}${p(d.getDate())}-DEMO`,
-    total: s + FEES[m].calc(s), eta: m === 'ship' ? '2–3 個工作天' : '約 15–20 分鐘'
-  };
-}
+  let result = null;
+  try { result = await response.json(); } catch (_) {}
+  if (response.ok && result?.ok === true) return result;
 
-/* 送出訂單到 Google Apps Script(doPost)。金額與訂單編號一律以後端回傳為準 */
+  const message = typeof result?.error === 'string' ? result.error : '';
+  throw new Error(message || (response.ok ? '伺服器回應格式不正確' : `伺服器錯誤（HTTP ${response.status}），請稍後再試`));
+}
 let submitting = false;
 async function submitOrder(m) {
   if (submitting) return;
   const btn = $('button[type=submit]', form), err = $('#formError');
-  // 欄位與 gas/Code.gs 的 doPost 一致;不送價格/總額,由後端以「商品」工作表重算
-  const st = STORES.find(s => s.id === form.store.value);
   const payload = {
     mode: m, name: form.name.value.trim(), phone: form.phone.value.trim(), email: form.email.value.trim(),
-    store: m !== 'ship' && st ? `${st.name} — ${st.addr}` : '',
     address: form.address.value.trim(), note: form.note.value.trim(),
     hp: form.hp.value, items: cart.map(i => ({ id: i.id, qty: i.qty }))
   };
+  if (m !== 'ship') payload.store_id = form.store.value;
   submitting = true; btn.disabled = true; btn.textContent = '送出中…';
   try {
-    const res = GAS_READY ? await callGas(payload) : demoOrder(m);
-    // 只有後端確認建立成功才清空購物車
-    $('#okNo').textContent = res.orderNo;
-    $('#trackNo').value = res.orderNo;
-    try { localStorage.setItem('jf_last_order', res.orderNo); } catch (_) {}
+    const res = await callOrderApi(ORDER_API.create, payload);
+    if (!/^JF\d{6}-\d{3,}$/.test(res.order_no)) throw new Error('訂單未建立，請檢查表單後再試');
+    $('#okNo').textContent = res.order_no;
+    $('#trackNo').value = res.order_no;
+    try { localStorage.setItem('jf_last_order', res.order_no); } catch (_) {}
     $('#okMode').textContent = MODE_NAME[m];
     $('#okEta').textContent = res.eta || '—';
     $('#okTotal').textContent = money(res.total);
@@ -832,8 +821,8 @@ function fmtTime(s) {
 }
 
 function renderTrack(o) {
-  $('#trNo').textContent = o.orderNo;
-  const label = o.status; // GAS 回傳中文狀態(新訂單、製作中…)
+  $('#trNo').textContent = o.order_no;
+  const label = o.statusLabel;
   const st = $('#trStatus'); st.textContent = label;
   st.className = 'rounded-full px-4 py-1.5 text-sm font-bold ' + (STATUS_STYLE[label] || 'bg-gray-200 text-gray-800');
   $('#trItems').innerHTML = '';
@@ -854,25 +843,20 @@ async function trackOrder(no, isRefresh) {
   const err = $('#trackError'), btns = [$('#trackForm button'), $('#trackRefresh')];
   no = String(no || '').trim().toUpperCase();
   err.classList.add('hidden');
-  if (!/^JF\d{6}-(\d{3,}|DEMO)$/.test(no)) {
+  if (!/^JF\d{6}-\d{3,}$/.test(no)) {
     err.textContent = '訂單編號格式不正確(例:JF251022-001)'; err.classList.remove('hidden'); return;
-  }
-  if (!GAS_READY) {
-    $('#trackResult').classList.add('hidden');
-    err.textContent = '尚未設定 Apps Script 網址,示範模式無法查詢訂單'; err.classList.remove('hidden'); return;
   }
   btns.forEach(b => b.disabled = true);
   $('#trackRefresh span').textContent = '查詢中…';
   try {
-    // GAS 的 track 動作只憑訂單編號查詢,只回傳品項/金額/狀態/時間(不含個資)
-    const res = await callGas({ action: 'track', orderNo: no });
-    lastTrackNo = res.orderNo; $('#trackNo').value = res.orderNo;
-    try { localStorage.setItem('jf_last_order', res.orderNo); } catch (_) {}
+    const res = await callOrderApi(ORDER_API.track, { order_no: no });
+    lastTrackNo = res.order_no; $('#trackNo').value = res.order_no;
+    try { localStorage.setItem('jf_last_order', res.order_no); } catch (_) {}
     renderTrack(res);
     if (isRefresh) toast('已更新為最新狀態');
   } catch (e) {
     $('#trackResult').classList.add('hidden');
-    err.textContent = e.network ? '網路異常,請檢查連線後再試' : e.message;
+    err.textContent = e.message;
     err.classList.remove('hidden');
   } finally {
     btns.forEach(b => b.disabled = false);
